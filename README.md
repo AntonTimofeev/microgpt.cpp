@@ -7,7 +7,7 @@ The focus is on readability (and optimization) rather than minimizing line count
 # Build & Run
 
 ```
-g++ -std=c++17 -O3 -DDEBUG microgpt.cpp -o microgpt
+g++ -std=c++20 -O3 -DDEBUG microgpt.cpp -o microgpt
 ./microgpt
 ```
 
