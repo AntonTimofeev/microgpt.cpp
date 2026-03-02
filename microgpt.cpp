@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cfloat>
 #include <cmath>
@@ -80,9 +81,7 @@ public:
         return static_cast<double>(value) / (1ULL << 53);
     }
 
-    uint_t getrandbits(const uint_t k) {
-        return rng() >> (32 - k);
-    }
+    uint_t getrandbits(const uint_t k) { return rng() >> (32 - k); }
 
     uint_t randbelow(const uint_t n) {
         if (n == 0) return 0;
@@ -103,7 +102,7 @@ public:
         }
     }
 
-    flt_t gauss(const double mu, const double sigma) {
+    flt_t gauss(const flt_t mu, const flt_t sigma) {
         auto z = gauss_next;
         gauss_next = std::numeric_limits<flt_t>::max();
 
@@ -116,13 +115,11 @@ public:
 
         return mu + z * sigma;
     }
-
-    std::vector<uint_t> choices(const flt_t *weights_ptr, const uint_t weights_count, const uint_t k = 1) {
-        std::vector<flt_t> cum_weights(weights_count);
-        flt_t acc = 0.0;
-        for (uint_t i = 0; i < weights_count; ++i) {
-            acc += weights_ptr[i];
-            cum_weights[i] = acc;
+    template<typename T, size_t N>
+    std::vector<uint_t> choices(const std::array<T, N> &weights, const uint_t k = 1) {
+        std::array<T, N> cum_weights{weights};
+        for (uint_t i = 1; i < N; ++i) {
+            cum_weights[i] += cum_weights[i-1];
         }
 
         auto total = cum_weights.back();
@@ -154,123 +151,66 @@ constexpr uint_t MAX_VOCAB_SIZE = 27;
 constexpr uint_t NUM_STEPS = 1000;
 
 
-struct Arena
+struct Value
 {
-    flt_t  *data{nullptr}; // pointer to data array
-    flt_t  *grad{nullptr}; // pointer to grad array
-    uint_t *i_child0{nullptr}; // pointer to first child index array
-    uint_t *i_child1{nullptr}; // pointer to second child index array
-    flt_t  *local_grad0{nullptr}; // pointer to first local grad array
-    flt_t  *local_grad1{nullptr}; // pointer to second local grad array
+    flt_t data{};
+    flt_t grad{};
+    uint_t i_child0{};
+    uint_t i_child1{};
+    flt_t local_grad0{};
+    flt_t local_grad1{};
+};
 
-    uint_t size{0}; // current number of elements in the arena per array (num of data = num of grad = ...)
-    uint_t cap{0}; // maximum size (number of elements) our arena can handle at the moment PER ARRAY
+class Arena : public std::vector<Value>
+{
+private:
     uint_t weights_end{0};
 
+public:
+    void init(uint_t n) { reserve(n); }
+    void weights_size_cutoff() { weights_end = size(); }
+    void truncate() { resize(weights_end); }
+    void zero_grad() { std::for_each(begin(), begin() + weights_end, [](Value &v){ v.grad = 0; }); }
 
-    void init(uint_t n) {
-        cap = n;
-        data = static_cast<flt_t*>(std::malloc(cap * sizeof(flt_t)));
-        grad = static_cast<flt_t*>(std::malloc(cap * sizeof(flt_t)));
-        i_child0 = static_cast<uint_t*>(std::malloc(cap * sizeof(uint_t)));
-        i_child1 = static_cast<uint_t*>(std::malloc(cap * sizeof(uint_t)));
-        local_grad0 = static_cast<flt_t*>(std::malloc(cap * sizeof(flt_t)));
-        local_grad1 = static_cast<flt_t*>(std::malloc(cap * sizeof(flt_t)));
-    }
-
-    void grow() { // double memory allocation for all arrays (Since they grow in parallel)
-        cap *= 2;
-        data = static_cast<flt_t*>(std::realloc(data, cap * sizeof(flt_t)));
-        grad = static_cast<flt_t*>(std::realloc(grad, cap * sizeof(flt_t)));
-        i_child0 = static_cast<uint_t*>(std::realloc(i_child0, cap * sizeof(uint_t)));
-        i_child1 = static_cast<uint_t*>(std::realloc(i_child1, cap * sizeof(uint_t)));
-        local_grad0 = static_cast<flt_t*>(std::realloc(local_grad0, cap * sizeof(flt_t)));
-        local_grad1 = static_cast<flt_t*>(std::realloc(local_grad1, cap * sizeof(flt_t)));
-    }
-
-    uint_t get_size() const { return size; } // current arena next pointer
-
-    inline void ensure() { if (size == cap) grow(); }
-
-    void weights_size_cutoff() { weights_end = size; }
-
-    void truncate() { size = weights_end; } // remove elements (ignore them) until size n
-
-    void zero_grad() { std::memset(grad, 0, weights_end * sizeof(flt_t)); }
-
-    inline uint_t push_no_op(flt_t d) {
-        ensure();
-        auto i = size++;
-        data[i] = d;
-        grad[i] = 0;
-        i_child0[i] = NO_CHILD; i_child1[i] = NO_CHILD;
-        local_grad0[i] = 0; local_grad1[i] = 0;
-        return i;
-    }
-
-    inline uint_t push_unary_op(flt_t d, uint_t i_c, flt_t g) {
-        ensure();
-        auto i = size++;
-        data[i] = d;
-        grad[i] = 0;
-        i_child0[i] = i_c; i_child1[i] = NO_CHILD;
-        local_grad0[i] = g; local_grad1[i] = 0;
-        return i;
-    }
-
-    inline uint_t push_binary_op(flt_t d, uint_t i_c0, flt_t g0, uint_t i_c1, flt_t g1) {
-        ensure();
-        auto i = size++;
-        data[i] = d;
-        grad[i] = 0;
-        i_child0[i] = i_c0; i_child1[i] = i_c1;
-        local_grad0[i] = g0; local_grad1[i] = g1;
-        return i;
-    }
-
-    void cleanup() {
-        std::free(data); std::free(grad);
-        std::free(i_child0); std::free(i_child1);
-        std::free(local_grad0); std::free(local_grad1);
-    }
+    inline uint_t push_op(flt_t d) { emplace_back(d, 0, NO_CHILD, NO_CHILD, 0, 0); return size() - 1; }
+    inline uint_t push_op(flt_t d, uint_t i_c, flt_t g) { emplace_back(d, 0, i_c, NO_CHILD, g, 0); return size() - 1; }
+    inline uint_t push_op(flt_t d, uint_t i_c0, flt_t g0, uint_t i_c1, flt_t g1) { emplace_back(d, 0, i_c0, i_c1, g0, g1); return size() - 1; }
 };
 
 Arena arena{};// memory management for all of our values
 
-void backward(uint_t i_loss) {
-    arena.grad[i_loss] = 1;
-    for (ssize_t i = i_loss; i >= 0; --i) {
-        auto g = arena.grad[i];
-        if (g == flt_t(0.0)) {continue;} // skip node when  grad is 0
-        auto i_c0 = arena.i_child0[i];
-        auto i_c1 = arena.i_child1[i];
-        if (i_c0 != NO_CHILD) {
-            arena.grad[i_c0] += arena.local_grad0[i] * g;
-            if (i_c1 != NO_CHILD) {
-                arena.grad[i_c1] += arena.local_grad1[i] * g;
+void backward() {
+    arena.back().grad = 1;
+    for (auto v_it = arena.rbegin(); v_it != arena.rend(); ++v_it) {
+        auto g = v_it->grad;
+        if (g == flt_t(0.0)) { continue; } // skip node when  grad is 0
+        if (auto i_c0 = v_it->i_child0; i_c0 != NO_CHILD) {
+            arena[i_c0].grad += v_it->local_grad0 * g;
+            if (auto i_c1 = v_it->i_child1; i_c1 != NO_CHILD) {
+                arena[i_c1].grad += v_it->local_grad1 * g;
             }
         }
     }
 }
 
 // operations (binary)
-inline uint_t vadd(uint_t a, uint_t b) { return arena.push_binary_op(arena.data[a] + arena.data[b], a, 1.0, b, 1.0); }
-inline uint_t vsub(uint_t a, uint_t b) { return arena.push_binary_op(arena.data[a] - arena.data[b], a, 1.0, b, -1.0); }
-inline uint_t vmul(uint_t a, uint_t b) { return arena.push_binary_op(arena.data[a] * arena.data[b], a, arena.data[b], b, arena.data[a]); }
-inline uint_t vdiv(uint_t a, uint_t b) { return arena.push_binary_op(arena.data[a] / arena.data[b], a, 1.0/arena.data[b], b, -arena.data[a]/(arena.data[b]*arena.data[b])); }
+inline uint_t vadd(uint_t a, uint_t b) { return arena.push_op(arena[a].data + arena[b].data, a, 1.0, b, 1.0); }
+inline uint_t vsub(uint_t a, uint_t b) { return arena.push_op(arena[a].data - arena[b].data, a, 1.0, b, -1.0); }
+inline uint_t vmul(uint_t a, uint_t b) { return arena.push_op(arena[a].data * arena[b].data, a, arena[b].data, b, arena[a].data); }
+inline uint_t vdiv(uint_t a, uint_t b) { return arena.push_op(arena[a].data / arena[b].data, a, 1.0/arena[b].data, b, -arena[a].data /(arena[b].data * arena[b].data)); }
 
 // operations (unary)
-inline uint_t vneg(uint_t a) { return arena.push_unary_op(-arena.data[a], a, -1.0); }
-inline uint_t vlog(uint_t a) { return arena.push_unary_op(std::log(arena.data[a]), a, 1.0 / arena.data[a]); }
-inline uint_t vexp(uint_t a) { auto e = std::exp(arena.data[a]); return arena.push_unary_op(e, a, e); }
-inline uint_t vrelu(uint_t a) { return arena.push_unary_op(std::max(flt_t{0.0}, arena.data[a]), a, arena.data[a] > 0 ? 1.0 : 0.0); }
-inline uint_t vpow(uint_t a, flt_t n) { return arena.push_unary_op(std::pow(arena.data[a], n), a, n * std::pow(arena.data[a], n - 1)); }
+inline uint_t vneg(uint_t a) { return arena.push_op(-arena[a].data, a, -1.0); }
+inline uint_t vlog(uint_t a) { return arena.push_op(std::log(arena[a].data), a, 1.0 / arena[a].data); }
+inline uint_t vexp(uint_t a) { auto e = std::exp(arena[a].data); return arena.push_op(e, a, e); }
+inline uint_t vrelu(uint_t a) { return arena.push_op(std::max(flt_t{0.0}, arena[a].data), a, arena[a].data > 0); }
+inline uint_t vpow(uint_t a, flt_t n) { return arena.push_op(std::pow(arena[a].data, n), a, n * std::pow(arena[a].data, n - 1)); }
 
 // operations with consts (1 node instead of 2)
-inline uint_t mul_const(uint_t a, flt_t c) { return arena.push_unary_op(arena.data[a] * c, a, c); }
-inline uint_t div_const(uint_t a, flt_t c) { return arena.push_unary_op(arena.data[a] / c, a, 1.0 / c); }
-inline uint_t add_const(uint_t a, flt_t c) { return arena.push_unary_op(arena.data[a] + c, a, 1.0); }
-inline uint_t sub_const(uint_t a, flt_t c) { return arena.push_unary_op(arena.data[a] - c, a, 1.0); }
+inline uint_t mul_const(uint_t a, flt_t c) { return arena.push_op(arena[a].data * c, a, c); }
+inline uint_t div_const(uint_t a, flt_t c) { return arena.push_op(arena[a].data / c, a, 1.0 / c); }
+inline uint_t add_const(uint_t a, flt_t c) { return arena.push_op(arena[a].data + c, a, 1.0); }
+inline uint_t sub_const(uint_t a, flt_t c) { return arena.push_op(arena[a].data - c, a, 1.0); }
 
 
 struct Matrix
@@ -278,14 +218,16 @@ struct Matrix
     uint_t data_start;
     uint_t rows, cols;
 
-    Matrix(uint_t rows, uint_t cols, double std=0.08) : rows(rows), cols(cols) {
-        data_start = arena.get_size(); // start at the current arena pointer
-        for (uint_t i = 0; i < rows*cols; ++i) arena.push_no_op(rng.gauss(0,std));
+    Matrix(uint_t rows, uint_t cols, flt_t std=0.08) : rows(rows), cols(cols) {
+        data_start = arena.size(); // start at the current arena pointer
+        for (uint_t i = 0; i < rows*cols; ++i) arena.push_op(rng.gauss(0,std));
     }
 
     uint_t at(uint_t i, uint_t j) const { return data_start + i * cols + j;}
 };
-struct Layer {
+
+struct Layer
+{
     Matrix attn_wq, attn_wk, attn_wv, attn_wo;
     Matrix mlp_fc1, mlp_fc2;
 
@@ -298,14 +240,16 @@ struct Layer {
         , mlp_fc2(n_embd, 4 * n_embd)
     {}
 };
-struct Model {
+
+struct Model
+{
     Matrix wte, wpe, lm_head;
     std::vector<Layer> layers;
 
-    Model(uint_t vocab_size, uint_t n_embd, uint_t block_size, uint_t n_layer):
-        wte(vocab_size, n_embd),
-        wpe(block_size, n_embd),
-        lm_head(vocab_size, n_embd)
+    Model(uint_t vocab_size, uint_t n_embd, uint_t block_size, uint_t n_layer)
+        : wte(vocab_size, n_embd)
+        , wpe(block_size, n_embd)
+        , lm_head(vocab_size, n_embd)
     {
         for(uint_t i = 0; i < n_layer; ++i) {
             layers.emplace_back(n_embd);
@@ -317,7 +261,7 @@ struct Model {
         p.reserve(4192);
         // helper to add all elements of a matrix
         auto add = [&](Matrix& m) {
-            for (uint_t i = 0; i < m.rows*m.cols; ++i) p.push_back(m.data_start+i); // add indices to matrix values in arena
+            for (uint_t i = 0; i < m.rows*m.cols; ++i) p.push_back(m.data_start + i); // add indices to matrix values in arena
         };
         add(wte);
         add(wpe);
@@ -334,23 +278,28 @@ struct Model {
     }
 };
 
-/*
-keys[layer][timestep][dimension]
-       |        |         |
-       |        |         -- which of the 16 numbers in the key vector (0..N_EMBD-1)
-       |        -- which token position was processed (grows: 0, 1, 2, ...)
-       -- which transformer layer (0..N_LAYER-1). Each layer has its own Q/K/V weights,
-          so each layer produces different keys and values
-
-key = [k0, k1, k2, k3,   k4, k5, k6, k7,   k8, k9, k10, k11,   k12, k13, k14, k15]
-       --- head 0 -----  ---- head 1 ----  ---- head 2 -----   ----- head 3 -----
-*/
-struct FlatKVCache{
+/**
+ *
+ * keys[layer][timestep][dimension]
+ *        |        |         |
+ *        |        |         -- which of the 16 numbers in the key vector (0..N_EMBD-1)
+ *        |        -- which token position was processed (grows: 0, 1, 2, ...)
+ *        -- which transformer layer (0..N_LAYER-1). Each layer has its own Q/K/V weights,
+ *           so each layer produces different keys and values
+ *
+ * key = [k0, k1, k2, k3,   k4, k5, k6, k7,   k8, k9, k10, k11,   k12, k13, k14, k15]
+ *        --- head 0 -----  ---- head 1 ----  ---- head 2 -----   ----- head 3 -----
+ **/
+struct FlatKVCache
+{
     std::vector<uint_t> data; // indices to find the values we need
     uint_t n_layer, dim;
-    uint_t counts[N_LAYER]{}; // timesteps per layer (max N_LAYER layers)
+    std::array<uint_t, N_LAYER> counts{}; // timesteps per layer (max N_LAYER layers)
 
-    FlatKVCache(uint_t n_layer, uint_t d) : n_layer(n_layer), dim(d) {
+    FlatKVCache(uint_t n_layer, uint_t d)
+        : n_layer(n_layer)
+        , dim(d)
+    {
         data.reserve(n_layer * BLOCK_SIZE * dim); // pre-alloc for up to BLOCK_SIZE timesteps (context length)
     }
 
@@ -370,15 +319,10 @@ struct FlatKVCache{
     }
 
     uint_t num_timesteps(uint_t i_layer) const { return counts[i_layer]; }
-
-    void clear() {
-        data.clear();
-        std::memset(counts, 0, sizeof(counts));
-    }
 };
 
-
-void linear(uint_t *out, const uint_t *x, Matrix &w) { // matrix * vector
+template<typename T, size_t N0, size_t N1>
+void linear(std::array<T, N0> &out, const std::array<T, N1> &x, Matrix &w) { // matrix * vector
     for(uint_t i = 0; i < w.rows; ++i) {
         auto sum = vmul(w.at(i,0), x[0]);
         for(uint_t j = 1; j < w.cols; ++j) {
@@ -388,62 +332,63 @@ void linear(uint_t *out, const uint_t *x, Matrix &w) { // matrix * vector
     }
 }
 
-void softmax(uint_t *out, const uint_t *logits, uint_t logits_len) {
-    auto max_val = arena.data[logits[0]];
-    for (uint_t i = 0; i < logits_len; ++i) max_val = std::max(arena.data[logits[i]], max_val);
-    uint_t exps[MAX_VOCAB_SIZE]; // indices of exps
+template<typename T, size_t N>
+void softmax(std::array<T, N> &out, const std::array<T, N> &logits, uint_t logits_len) {
+    auto max_val = arena[logits[0]].data;
+    for (uint_t i = 0; i < logits_len; ++i) max_val = std::max(arena[logits[i]].data, max_val);
+    std::array<uint_t, MAX_VOCAB_SIZE> exps{}; // indices of exps
     for (uint_t i = 0; i < logits_len; ++i) exps[i] = vexp(sub_const(logits[i], max_val));
     auto total = exps[0];
     for (uint_t i = 1; i < logits_len; ++i) total = vadd(total, exps[i]);
     for (uint_t i = 0; i < logits_len; ++i) out[i] = vdiv(exps[i], total);
 }
 
-void rmsnorm(uint_t *out, const uint_t *x, uint_t x_len) {
+template<typename T, size_t N>
+void rmsnorm(std::array<T, N> &out, const std::array<T, N> &x, uint_t x_len) {
     auto total = vmul(x[0], x[0]);
     for (uint_t i = 1; i < x_len; ++i) total = vadd(total, vmul(x[i], x[i]));
     total = div_const(total, x_len);
-    auto scale = vpow(add_const(total,1e-5), flt_t{-0.5});
+    auto scale = vpow(add_const(total,flt_t{1e-5}), flt_t{-0.5});
     for (uint_t i = 0; i < x_len; ++i) out[i] = vmul(x[i], scale);
 }
 
-
+template<typename T, size_t N>
 void gpt(
-    uint_t *logits_out,
+    std::array<T, N> &logits_out,
     const uint_t token_id,
     const uint_t pos_id,
     FlatKVCache &keys,
     FlatKVCache &values,
     Model &state_dict
 ) {
-    uint_t x[N_EMBD]; // joint token and position embedding
-    uint_t tmp[N_EMBD]; // tmp array for rmsnorm, since we can't do it in place
+    std::array<uint_t, N_EMBD> x{}; // joint token and position embedding
+    std::array<uint_t, N_EMBD> tmp{}; // tmp array for rmsnorm, since we can't do it in place
     for (uint_t j = 0; j < N_EMBD; ++j)
         x[j] = vadd(state_dict.wte.at(token_id, j), state_dict.wpe.at(pos_id, j));
     rmsnorm(tmp, x, N_EMBD);
-    std::memcpy(x, tmp, sizeof(x));
+    x = tmp;
 
     for (uint_t i_layer=0; i_layer < N_LAYER; ++i_layer) {
         // save residual
-        uint_t x_residual[N_EMBD];
-        std::memcpy(x_residual, x, sizeof(x_residual));
+        std::array<uint_t, N_EMBD> x_residual{x};
         // rmsnorm
         rmsnorm(tmp, x, N_EMBD);
-        std::memcpy(x, tmp, sizeof(x));
+        x = tmp;
         // Q, K, V
-        uint_t q[N_EMBD], k[N_EMBD], v[N_EMBD];
+        std::array<uint_t, N_EMBD> q, k, v;
         linear(q, x, state_dict.layers[i_layer].attn_wq);
         linear(k, x, state_dict.layers[i_layer].attn_wk);
         linear(v, x, state_dict.layers[i_layer].attn_wv);
-        keys.push(i_layer, k);
-        values.push(i_layer, v);
+        keys.push(i_layer, k.data());
+        values.push(i_layer, v.data());
         // multi-head attention
-        uint_t x_attn[N_EMBD];
+        std::array<uint_t, N_EMBD> x_attn{};
         auto num_timesteps = keys.num_timesteps(i_layer);
         for(uint_t h = 0; h < N_HEAD; ++h) {
             auto hs = h * HEAD_DIM; // starting index of the full N_EMBD vector for head
 
             // computing attention dot(q_h, k_h[t]) / sqrt(head_dim)
-            uint_t attention_logits[BLOCK_SIZE];
+            std::array<uint_t, BLOCK_SIZE> attention_logits{};
             for (uint_t t = 0; t < num_timesteps; ++t) {
                 auto sum = vmul(q[hs],keys.get(i_layer, t, hs));
                 for (uint_t j = 1;j < HEAD_DIM; ++j) {
@@ -452,7 +397,7 @@ void gpt(
                 attention_logits[t] = mul_const(sum, INV_SQRT_HEAD_DIM);
             }
             // softmax
-            uint_t attn_weights[BLOCK_SIZE];
+            std::array<uint_t, BLOCK_SIZE> attn_weights{};
             softmax(attn_weights, attention_logits, num_timesteps);
 
             // weighted sum of values
@@ -473,11 +418,11 @@ void gpt(
             x[i] = vadd(x[i], x_residual[i]);
         }
         // MLP block
-        std::memcpy(x_residual, x, sizeof(x_residual));
+        x_residual = x;
         rmsnorm(tmp, x, N_EMBD);
-        std::memcpy(x, tmp, sizeof(x));
+        x = tmp;
 
-        uint_t mlp_hidden[4 * N_EMBD]; // since shape of mlp_fc1 is (4*N_EMBD, N_EMBD)
+        std::array<uint_t, 4 * N_EMBD> mlp_hidden{}; // since shape of mlp_fc1 is (4*N_EMBD, N_EMBD)
         linear(mlp_hidden, x, state_dict.layers[i_layer].mlp_fc1);
         for (uint_t i = 0; i < 4 * N_EMBD; ++i) mlp_hidden[i] = vrelu(mlp_hidden[i]);
         linear(x, mlp_hidden,  state_dict.layers[i_layer].mlp_fc2);
@@ -516,7 +461,7 @@ int main() {
 
     // build char lookup
     std::vector<char> idx_to_char(uchars.begin(), uchars.end());
-    uint_t char_to_idx[256]{}; // to cover all ASCII
+    std::array<uint_t, 255> char_to_idx{}; // to cover all ASCII
     { uint_t idx = 0; for (char c : uchars) char_to_idx[uint_t(c)] = idx++; } // reverse idx_to_char to char_to_udx
 
 
@@ -525,15 +470,15 @@ int main() {
     auto params = state_dict.params();
     LOG("Number of params: "<<params.size());
 
-    float learning_rate = 0.01, beta1 = 0.85, beta2 = 0.99, eps_adam = 1e-8;
-    std::vector<double> m(params.size(), 0.0);
-    std::vector<double> v(params.size(), 0.0);
+    flt_t learning_rate = 0.01, beta1 = 0.85, beta2 = 0.99, eps_adam = 1e-8;
+    std::vector<flt_t> m(params.size(), 0.0);
+    std::vector<flt_t> v(params.size(), 0.0);
 
     // training loop
     for (uint_t step = 0; step < NUM_STEPS; ++step) {
         // Take a document, tokenize it, surround it by BOS tokens
         std::string doc = docs[step%docs.size()];
-        uint_t tokens[BLOCK_SIZE + 2]; // context + 2 BOS
+        std::array<uint_t, BLOCK_SIZE + 2> tokens{}; // context + 2 BOS
         uint_t token_len = 0;
         tokens[token_len++] = BOS;
         for (char ch:doc) { tokens[token_len++] = char_to_idx[uint_t(ch)]; }
@@ -542,14 +487,14 @@ int main() {
 
         //forward tokens through the model
         FlatKVCache keys(N_LAYER, N_EMBD), values(N_LAYER, N_EMBD);
-        uint_t losses[BLOCK_SIZE];
+        std::array<uint_t, BLOCK_SIZE> losses{};
         uint_t n_losses = 0;
         for (uint_t pos_id = 0; pos_id < n; ++pos_id) {
             auto token_id = tokens[pos_id];
             auto target_id = tokens[pos_id+1];
-            uint_t logits[MAX_VOCAB_SIZE];
+            std::array<uint_t, MAX_VOCAB_SIZE> logits{};
             gpt(logits, token_id, pos_id, keys, values, state_dict);
-            uint_t probs[MAX_VOCAB_SIZE];
+            std::array<uint_t, MAX_VOCAB_SIZE> probs{};
             softmax(probs, logits, vocab_size);
             losses[n_losses++] = vneg(vlog(probs[target_id]));
         }
@@ -559,49 +504,49 @@ int main() {
         auto loss = mul_const(total_losses, 1.0/n);
 
         // backward pass
-        backward(loss);
+        backward();
 
         // adam optimizer
-        float lr_t = learning_rate*(1-(double)step/NUM_STEPS);
-        double beta1_pow = std::pow(beta1,(step + 1));
-        double beta2_pow = std::pow(beta2,(step + 1));
+        flt_t lr_t = learning_rate*(1-(flt_t)step/NUM_STEPS);
+        flt_t beta1_pow = std::pow(beta1,(step + 1));
+        flt_t beta2_pow = std::pow(beta2,(step + 1));
         for (uint_t i = 0; i < params.size(); ++i) {
             auto i_p = params[i]; // parameter index
-            auto p_grad = arena.grad[i_p]; // parameter gradient
+            auto p_grad = arena[i_p].grad; // parameter gradient
             m[i] = beta1 * m[i] + (1 - beta1) * p_grad;
             v[i] = beta2 * v[i] + (1 - beta2) * p_grad * p_grad;
             auto m_hat = m[i] / (1 - beta1_pow);
             auto v_hat = v[i] / (1 - beta2_pow);
-            arena.data[i_p] -= lr_t*m_hat / (std::sqrt(v_hat)+eps_adam);
+            arena[i_p].data -= lr_t*m_hat / (std::sqrt(v_hat) + eps_adam);
         }
-        LOG("Step "<<(step+1)<<" / "<<NUM_STEPS<<" | loss "<< arena.data[loss]);
-        LOG("Arena size: " << arena.get_size());
+        LOG("Step " << (step+1) << " / " << NUM_STEPS << " | loss " << arena[loss].data);
+        LOG("Arena size: " << arena.size());
         arena.truncate(); // clean until end of weights values
         arena.zero_grad();
     }
 
-    float temperature = 0.5;
-    LOG("\n\nTime for inference---------------");
+    flt_t temperature = 0.5;
+    std::cout << "\n\nTime for inference---------------" << std::endl;
     for (uint_t sample_idx = 0; sample_idx < 20; ++sample_idx) {
         FlatKVCache keys(N_LAYER, N_EMBD), values(N_LAYER, N_EMBD);
         auto token_id = BOS;
         std::vector<char> samples;
         for (uint_t pos_id = 0; pos_id < BLOCK_SIZE; ++pos_id) {
-            uint_t logits[MAX_VOCAB_SIZE];
+            std::array<uint_t, MAX_VOCAB_SIZE> logits{};
             gpt(logits, token_id, pos_id, keys, values, state_dict);
             for (uint_t i = 0; i < vocab_size; ++i)
                 logits[i] = mul_const(logits[i],1.0/temperature);
-            uint_t probs[MAX_VOCAB_SIZE];
+            std::array<uint_t, MAX_VOCAB_SIZE> probs{};
             softmax(probs, logits, vocab_size);
 
-            flt_t weights[MAX_VOCAB_SIZE];
-            for (uint_t i = 0; i < vocab_size; ++i) weights[i] = arena.data[probs[i]];
-            token_id = rng.choices(weights, vocab_size)[0];
+            std::array<flt_t, MAX_VOCAB_SIZE> weights{};
+            for (uint_t i = 0; i < vocab_size; ++i) weights[i] = arena[probs[i]].data;
+            token_id = rng.choices(weights)[0];
             if (token_id == BOS) break;
             samples.push_back(idx_to_char[token_id]);
         }
         std::string result(samples.begin(), samples.end());
-        LOG("Sample: "<< sample_idx<<": "<<result);
+        std::cout << "Sample: " << sample_idx << ": " << result << std::endl;
         arena.truncate(); // clean until end of weights values
     }
     return 0;
