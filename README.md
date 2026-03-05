@@ -7,8 +7,8 @@ The focus is on readability (and optimization) rather than minimizing line count
 # Build & Run
 
 ```
-g++ -std=c++20 -O3 -DDEBUG microgpt.cpp -o microgpt
-./microgpt
+g++ -std=c++20 -O3 -DDEBUG -ffast-math -march=native -mtune=native microgpt.cpp -o microgpt
+time ./microgpt
 ```
 
 You can remove `-DDEBUG` for slightly faster execution.
