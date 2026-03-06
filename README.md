@@ -7,55 +7,47 @@ The focus is on readability (and optimization) rather than minimizing line count
 # Build & Run
 
 ```
-g++ -std=c++20 -O3 -DDEBUG -ffast-math -march=native -mtune=native microgpt.cpp -o microgpt
+g++ -std=c++20 -O3 -ffast-math -march=native -mtune=native microgpt.cpp -o microgpt
 time ./microgpt
 ```
 
-You can remove `-DDEBUG` for slightly faster execution.
-
-Adding `-march=native -ffast-math` can squeeze out another couple of % (haven't fully tested that yet).
+You can add `-DDEBUG` to see how it learns.
 
 # Performance
 
 Andrej Karpathy's [microgpt.py](https://gist.github.com/karpathy/8627fe009c40f57531cb18360106ce95) was never meant to be fast, its goal is extreme readability and making it easy to learn how a GPT works from scratch. This C++ version focuses on optimization while remaining reasonably readable (barely at this point), because optimization is fun.
 
-All benchmarks run on `Intel Core Ultra 7 165H`, using [PyPy JIT](https://pypy.org/) as the Python performance baseline.
-
-_Note: 16x16 = N_EMBD=16, BLOCK_SIZE=16_
+All tests run on `Intel Core i9-12900K`
 
 ### 16x16 network, 10000 steps
+| Implementation | Time | vs PyPy JIT |Compilation flags|
+|---|---|---|---|
+|Python3|10m31,441s (631.441s)|0.23x||
+|PyPy3|2m24,174s (144.174s)|1x||
+|[rust-microgpt](https://github.com/mplekh/rust-microgpt/tree/94005e239d99382046190dd01d60a85e7b17c13b)|0m1,070s (1.07s)|134x|`RUSTFLAGS="-C target-cpu=native" cargo run --release`|
+|[Charbel199/microgpt.cpp](https://github.com/Charbel199/microgpt.cpp/tree/fc455d04fd89f49d22e183b86a51d0be3ba0e501)|0m0,893s (0.893s)|161x|`g++ -std=c++17 -Ofast -march=native -mtune=native microgpt.cpp -o microgpt`|
+|[AntonTimofeev/microgpt.cpp](https://github.com/AntonTimofeev/microgpt.cpp/tree/7be08fa6221d3bb44574c8b97535688adb2571b4)|0m0,846s (0.846s)|170x|`g++ -std=c++20 -O3 -ffast-math -march=native -mtune=native microgpt.cpp -o microgpt`|
+|[vixhal-baraiya/microgpt-c](https://github.com/vixhal-baraiya/microgpt-c/tree/43b3b24c781d65057f7b0e1296affd3a68a41b15)|0m0,027s (0.027s)|5339x|`gcc -O3 -ffast-math -march=native -mtune=native -o microgpt microgpt.c -lm`|
 
-| Implementation | Time | vs PyPy JIT |
-|---|---|---|
-| Python (CPython) | 22m 4s | ~6.7x slower |
-| Python (PyPy JIT) | 3m 16s | 1x |
-| [C++ (original)](https://github.com/Charbel199/microgpt.cpp/blob/3e49721ea766058cae617d7fe43092caee1198d4) | 3.3s | **~60x** |
-| [Rust](https://github.com/mplekh/rust-microgpt) | 2.9s | **~68x** |
-| C++ (enhanced) | 2.2s | **~89x** |
 
-### 64x64 network, 1000 steps
+`microgpt-c` uses pre-allocated arrays for intermediate results, and different approach in computing gradients. Because of that approach it is quite difficult to acheive same output as in python, but I'll try to do that.
 
-| Implementation | Time | vs PyPy JIT |
-|---|---|---|
-| Python (CPython) | 1h 14m | ~10.9x slower |
-| Python (PyPy JIT) | 6m 47s | 1x |
-| [C++ (original)](https://github.com/Charbel199/microgpt.cpp/blob/3e49721ea766058cae617d7fe43092caee1198d4) | 8.2s | **~50x** |
-| [Rust](https://github.com/mplekh/rust-microgpt) | 4.8s | **~85x** |
-| C++ (enhanced) | 2.9s | **~140x** |
+C/C++ results are a 10 runs average time.
 
-_C++ compiled with `g++ -std=c++17 -O3`. PyPy benchmarked with [PyPy 7.3.17](https://pypy.org/download.html). Rust compilation profile:_
-
-```toml
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-strip = true
 ```
+$ python3 --version
+Python 3.10.12
 
-C++ (enhanced) is the most performant but requires the most optimization effort.
+$ pypy3 --version
+Python 3.8.13 (7.3.9+dfsg-1ubuntu0.1, Nov 15 2022, 06:22:50)
+[PyPy 7.3.9 with GCC 11.3.0]
 
-### Rust
+$ rustc --version
+rustc 1.93.1 (01f6ddf75 2026-02-11)
 
-The [rust implementation](https://github.com/mplekh/rust-microgpt) is already faster than C++ (original) out of the box. The remaining gap vs C++ (enhanced) comes from bounds checking on every `Vec::push`, which the C++ version avoids through a pre-allocated arena.
+$ g++ --version
+g++ (Ubuntu 12.3.0-1ubuntu1~22.04.3) 12.3.0
+Copyright (C) 2022 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+```
