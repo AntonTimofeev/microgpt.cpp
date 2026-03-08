@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <execution>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -148,8 +147,10 @@ constexpr uint_t N_LAYER = 1;
 constexpr uint_t N_EMBD = 16;
 constexpr uint_t BLOCK_SIZE = 16;
 constexpr uint_t N_HEAD = 4;
+constexpr uint_t SQRT_N_HEAD = 2;
+static_assert(N_HEAD == SQRT_N_HEAD*SQRT_N_HEAD);
 constexpr uint_t HEAD_DIM = N_EMBD / N_HEAD;
-const      flt_t INV_SQRT_HEAD_DIM = 1.0 / std::sqrt(flt_t{HEAD_DIM});
+constexpr flt_t INV_SQRT_HEAD_DIM = flt_t{1} / SQRT_N_HEAD;
 constexpr uint_t NO_CHILD = -1; // since children point to indices -> no child index = -1
 constexpr uint_t MAX_VOCAB_SIZE = 27;
 constexpr uint_t NUM_STEPS = 1000;
@@ -158,11 +159,11 @@ constexpr uint_t NUM_STEPS = 1000;
 struct Value
 {
     flt_t data{};
-    flt_t local_grad0{};
-    flt_t local_grad1{};
-    uint_t i_child0{};
-    uint_t i_child1{};
-    uint_t i_child2{};
+    const flt_t local_grad0{};
+    const flt_t local_grad1{};
+    const uint_t i_child0{};
+    const uint_t i_child1{};
+    const uint_t i_child2{};
 };
 
 
@@ -186,60 +187,59 @@ public:
     }
 };
 
-Arena arena{};// memory management for all of our values
+Arena arena{}; // memory management for all of our values
+const auto &c_arena{arena}; // const view (sort of)
 
 void backward() {
-    arena.grad.resize(arena.size());
-    std::fill(arena.grad.begin(), arena.grad.end(), flt_t{0});
-    arena.grad.back() = flt_t{1};
+    std::vector<flt_t> grad(c_arena.size(), flt_t{0});
+    grad.back() = flt_t{1};
 
-    auto v_it = arena.crbegin();
-    auto &grad = arena.grad;
-    auto g_it = grad.crbegin();
-    for (; g_it != grad.crend(); ++v_it, ++g_it) {
-        auto g = *g_it;
+    auto v_it = c_arena.rbegin();
+    for (auto g_it = grad.crbegin(); g_it != grad.crend(); ++v_it, ++g_it) {
+        const auto g = *g_it;
         if (const auto i_c0 = v_it->i_child0; g != flt_t{0} && i_c0 != NO_CHILD) {
             grad[i_c0] += v_it->local_grad0 * g;
-
             if (const auto i_c1 = v_it->i_child1; i_c1 != NO_CHILD) {
                 grad[i_c1] += v_it->local_grad1 * g;
-
                 if (const auto i_c2 = v_it->i_child2; i_c2 != NO_CHILD) {
                     grad[i_c2] += g; // third child local_grad is always const
                 }
             }
         }
     }
+    arena.grad.swap(grad);
 }
 
+
 // operations (ternary)
-inline uint_t vmul_add(uint_t a, uint_t b, uint_t c) {
-    return arena.push_op(arena[a].data * arena[b].data + arena[c].data,
-        a, arena[b].data,
-        b, arena[a].data,
+inline uint_t vmul_add(const uint_t a, const uint_t b, const uint_t c) {
+    return arena.push_op(c_arena[a].data * c_arena[b].data + c_arena[c].data,
+        a, c_arena[b].data,
+        b, c_arena[a].data,
         c
     );
 }
 
 // operations (binary)
-inline uint_t vadd(uint_t a, uint_t b) { return arena.push_op(arena[a].data + arena[b].data, a, flt_t{1.0}, b, flt_t{1.0}); }
-inline uint_t vsub(uint_t a, uint_t b) { return arena.push_op(arena[a].data - arena[b].data, a, flt_t{1.0}, b, flt_t{-1.0}); }
-inline uint_t vmul(uint_t a, uint_t b) { return arena.push_op(arena[a].data * arena[b].data, a, arena[b].data, b, arena[a].data); }
-inline uint_t vdiv(uint_t a, uint_t b) { return arena.push_op(arena[a].data / arena[b].data, a, flt_t{1.0}/arena[b].data, b, -arena[a].data /(arena[b].data * arena[b].data)); }
+inline uint_t vadd(const uint_t a, const uint_t b) { return arena.push_op(c_arena[a].data + c_arena[b].data, a, flt_t{1.0}, b, flt_t{1.0}); }
+inline uint_t vsub(const uint_t a, const uint_t b) { return arena.push_op(c_arena[a].data - c_arena[b].data, a, flt_t{1.0}, b, flt_t{-1.0}); }
+inline uint_t vmul(const uint_t a, const uint_t b) { return arena.push_op(c_arena[a].data * c_arena[b].data, a, c_arena[b].data, b, c_arena[a].data); }
+inline uint_t vdiv(const uint_t a, const uint_t b) { return arena.push_op(c_arena[a].data / c_arena[b].data, a, flt_t{1.0}/c_arena[b].data, b, -c_arena[a].data /(c_arena[b].data * c_arena[b].data)); }
 
 // operations (unary)
-inline uint_t vneg(uint_t a) { return arena.push_op(-arena[a].data, a, flt_t{-1.0}); }
-inline uint_t vlog(uint_t a) { return arena.push_op(std::log(arena[a].data), a, flt_t{1.0}/arena[a].data); }
-inline uint_t vexp(uint_t a) { auto e = std::exp(arena[a].data); return arena.push_op(e, a, e); }
-inline uint_t vrelu(uint_t a) { return arena.push_op(std::max(flt_t{0.0}, arena[a].data), a, arena[a].data > flt_t{0}); }
-inline uint_t vpow(uint_t a, flt_t n) { return arena.push_op(std::pow(arena[a].data, n), a, n * std::pow(arena[a].data, n - 1)); }
-inline uint_t vinv_sqrt(uint_t a) { auto val = std::pow(arena[a].data + flt_t{1e-5f}, flt_t{-0.5f}); return arena.push_op(val, a, flt_t{-0.5} * val / (arena[a].data + flt_t{1e-5})); }
+inline uint_t vneg(const uint_t a) { return arena.push_op(-c_arena[a].data, a, flt_t{-1.0}); }
+inline uint_t vlog(const uint_t a) { return arena.push_op(std::log(c_arena[a].data), a, flt_t{1.0}/c_arena[a].data); }
+inline uint_t vexp(const uint_t a) { const auto val = std::exp(c_arena[a].data); return arena.push_op(val, a, val); }
+inline uint_t vrelu(const uint_t a) { return arena.push_op(std::max(flt_t{0.0}, c_arena[a].data), a, c_arena[a].data > flt_t{0}); }
+inline uint_t vpow(const uint_t a, const flt_t n) { return arena.push_op(std::pow(c_arena[a].data, n), a, n * std::pow(c_arena[a].data, n - 1)); }
+inline uint_t vinv_sqrt(const uint_t a) { const auto val = std::pow(c_arena[a].data + flt_t{1e-5}, flt_t{-0.5}); return arena.push_op(val, a, val / (flt_t{-2} * (c_arena[a].data + flt_t{1e-5}))); }
 
 // operations with consts (1 node instead of 2)
-inline uint_t add_const(uint_t a, flt_t c) { return arena.push_op(arena[a].data + c, a, flt_t{1.0}); }
-inline uint_t sub_const(uint_t a, flt_t c) { return arena.push_op(arena[a].data - c, a, flt_t{1.0}); }
-inline uint_t mul_const(uint_t a, flt_t c) { return arena.push_op(arena[a].data * c, a, c); }
-inline uint_t div_const(uint_t a, flt_t c) { return arena.push_op(arena[a].data / c, a, flt_t{1.0} / c); }
+inline uint_t add_const(const uint_t a, const flt_t c) { return arena.push_op(c_arena[a].data + c, a, flt_t{1.0}); }
+inline uint_t sub_const(const uint_t a, const flt_t c) { return arena.push_op(c_arena[a].data - c, a, flt_t{1.0}); }
+inline uint_t mul_const(const uint_t a, const flt_t c) { return arena.push_op(c_arena[a].data * c, a, c); }
+inline uint_t div_const(const uint_t a, const flt_t c) { return arena.push_op(c_arena[a].data / c, a, flt_t{1.0} / c); }
+inline uint_t vexp_sub_const(const uint_t a, const flt_t c) { const auto val = std::exp(c_arena[a].data - c); return arena.push_op(val, a, val); }
 
 
 struct Matrix
@@ -247,7 +247,7 @@ struct Matrix
     const uint_t data_start, rows, cols;
 
     Matrix(const uint_t rows, const uint_t cols, const flt_t std=0.08)
-        : data_start(arena.size()) // start at the current arena pointer
+        : data_start(c_arena.size()) // start at the current arena pointer
         , rows(rows)
         , cols(cols)
     {
@@ -262,7 +262,7 @@ struct Layer
     Matrix attn_wq, attn_wk, attn_wv, attn_wo;
     Matrix mlp_fc1, mlp_fc2;
 
-    Layer(uint_t n_embd)
+    Layer(const uint_t n_embd)
         : attn_wq(n_embd, n_embd)
         , attn_wk(n_embd, n_embd)
         , attn_wv(n_embd, n_embd)
@@ -277,7 +277,7 @@ struct Model
     Matrix wte, wpe, lm_head;
     std::vector<Layer> layers;
 
-    Model(uint_t vocab_size, uint_t n_embd, uint_t block_size, uint_t n_layer)
+    Model(const uint_t vocab_size, const uint_t n_embd, const uint_t block_size, const uint_t n_layer)
         : wte(vocab_size, n_embd)
         , wpe(block_size, n_embd)
         , lm_head(vocab_size, n_embd)
@@ -285,26 +285,6 @@ struct Model
         for(uint_t i = 0; i < n_layer; ++i) {
             layers.emplace_back(n_embd);
         }
-    }
-
-    std::vector<uint_t> params() {
-        std::vector<uint_t> p;
-        // helper to add all elements of a matrix
-        auto add = [&](const Matrix& m) {
-            for (uint_t i = 0; i < m.rows*m.cols; ++i) p.push_back(m.data_start + i); // add indices to matrix values in arena
-        };
-        add(wte);
-        add(wpe);
-        add(lm_head);
-        for (auto& layer : layers) {
-            add(layer.attn_wq);
-            add(layer.attn_wk);
-            add(layer.attn_wv);
-            add(layer.attn_wo);
-            add(layer.mlp_fc1);
-            add(layer.mlp_fc2);
-        }
-        return p;
     }
 };
 
@@ -324,15 +304,12 @@ void linear(std::array<T, N0> &out, const std::array<T, N1> &x, const Matrix &w)
 }
 
 template<typename T, size_t N>
-void softmax(std::array<T, N> &out, const std::array<T, N> &logits, uint_t logits_len) {
-    auto i_max_it = std::max_element(std::execution::unseq, logits.begin(), logits.end(),
-        [&arena = std::as_const(arena)](const T& a, const T& b) {
-            return arena[a].data < arena[b].data;
-        });
-    auto max_val = arena[*i_max_it].data;
+void softmax(std::array<T, N> &out, const std::array<T, N> &logits, const uint_t logits_len) {
+    flt_t max_val = std::numeric_limits<flt_t>::lowest();
+    for (uint_t i = 0; i < logits_len; ++i) max_val = std::max(max_val, c_arena[logits[i]].data);
 
     std::array<uint_t, MAX_VOCAB_SIZE> exps{}; // indices of exps
-    for (uint_t i = 0; i < logits_len; ++i) exps[i] = vexp(sub_const(logits[i], max_val));
+    for (uint_t i = 0; i < logits_len; ++i) exps[i] = vexp_sub_const(logits[i], max_val);
     auto total = exps[0];
     for (uint_t i = 1; i < logits_len; ++i) total = vadd(total, exps[i]);
     for (uint_t i = 0; i < logits_len; ++i) out[i] = vdiv(exps[i], total);
@@ -439,8 +416,11 @@ int main() {
     ); // it will grow automatically, this is just a hint to avoid a couple of realloc at the start
 
     if (!std::filesystem::exists("input.txt")) {
-        LOG("Downloading input.txt ...");
-         if (system("wget -q -O input.txt https://raw.githubusercontent.com/karpathy/makemore/988aa59/names.txt") != 0) LOG("Download failed");
+        std::cout << "Downloading input.txt ..." << std::endl;
+        if (system("wget -q -O input.txt https://raw.githubusercontent.com/karpathy/makemore/988aa59/names.txt") != 0) {
+            std::cerr << "Download failed" << std::endl;
+            return -1;
+        }
     }
     std::vector<std::string> docs;
     std::ifstream file("input.txt");
@@ -449,13 +429,13 @@ int main() {
         if (!line.empty()) docs.push_back(line);
     }
     rng.shuffle(docs);
-    LOG("We have " << docs.size() << " names.");
+    std::cout << "We have " << docs.size() << " names." << std::endl;
 
     std::set<char> uchars{};
     for (auto& name: docs) uchars.insert(name.begin(), name.end());
     uint_t BOS = uchars.size(); // token id for a special Beginning of Sequence (BOS) token
     uint_t vocab_size = uchars.size() + 1;
-    LOG("Vocab size is: "<<vocab_size);
+    std::cout << "Vocab size is: " << vocab_size << std::endl;
     if (vocab_size > MAX_VOCAB_SIZE) [[unlikely]] {
         throw std::runtime_error("vocab_size (" + std::to_string(vocab_size) + ") exceeds MAX_VOCAB_SIZE (" + std::to_string(MAX_VOCAB_SIZE) + ")");
     }
@@ -468,12 +448,12 @@ int main() {
 
     Model state_dict(vocab_size, N_EMBD, BLOCK_SIZE, N_LAYER);
     arena.weights_size_cutoff();
-    auto params = state_dict.params();
-    LOG("Number of params: " << params.size());
+    const auto params_size = arena.size();
+    std::cout << "Number of params: " << params_size << std::endl;
 
-    flt_t learning_rate = 0.01, beta1 = 0.85, beta2 = 0.99, eps_adam = 1e-8;
-    std::vector<flt_t> m(params.size(), 0.0);
-    std::vector<flt_t> v(params.size(), 0.0);
+    const flt_t learning_rate = 0.01, beta1 = 0.85, beta2 = 0.99, eps_adam = 1e-8;
+    std::vector<flt_t> m(params_size, flt_t{0});
+    std::vector<flt_t> v(params_size, flt_t{0});
 
     // training loop
     for (uint_t step = 0; step < NUM_STEPS; ++step) {
@@ -502,26 +482,23 @@ int main() {
 
         auto total_losses = losses[0];
         for (uint_t i = 1; i < n_losses; ++i) total_losses = vadd(total_losses, losses[i]);
-        const auto loss = mul_const(total_losses, flt_t{1.0}/n);
+        const auto loss = div_const(total_losses, n);
 
         // backward pass
         backward();
 
         // adam optimizer
         const flt_t lr_t = learning_rate * (flt_t{1} - flt_t(step) / NUM_STEPS);
-        const flt_t beta1_pow = std::pow(beta1,(step + 1));
-        const flt_t beta2_pow = std::pow(beta2,(step + 1));
-        for (uint_t i = 0; i < params.size(); ++i) {
-            const auto i_p = params[i]; // parameter index
-            const auto p_grad = arena.grad[i_p]; // parameter gradient
+        const flt_t beta1_pow = flt_t{1} - std::pow(beta1,(step + 1));
+        const flt_t beta2_pow = flt_t{1} - std::pow(beta2,(step + 1));
+        for (uint_t i = 0; i < params_size; ++i) {
+            const auto p_grad = c_arena.grad[i]; // parameter gradient
             m[i] = beta1 * m[i] + (1 - beta1) * p_grad;
             v[i] = beta2 * v[i] + (1 - beta2) * p_grad * p_grad;
-            const auto m_hat = m[i] / (1 - beta1_pow);
-            const auto v_hat = v[i] / (1 - beta2_pow);
-            arena[i_p].data -= lr_t*m_hat / (std::sqrt(v_hat) + eps_adam);
+            arena[i].data -= lr_t * m[i] / ((std::sqrt(v[i] / beta2_pow) + eps_adam) * beta1_pow);
         }
-        LOG("Step " << (step+1) << " / " << NUM_STEPS << " | loss " << arena[loss].data);
-        LOG("Arena size: " << arena.size());
+        LOG("Step " << (step+1) << " / " << NUM_STEPS << " | loss " << c_arena[loss].data);
+        LOG("Arena size: " << c_arena.size());
         arena.truncate(); // clean until end of weights values
     }
 
@@ -537,11 +514,12 @@ int main() {
             gpt(logits, token_id, pos_id, keys, values, state_dict);
             for (uint_t i = 0; i < vocab_size; ++i)
                 logits[i] = mul_const(logits[i], inv_temp);
+
             std::array<uint_t, MAX_VOCAB_SIZE> probs{};
             softmax(probs, logits, vocab_size);
 
             std::array<flt_t, MAX_VOCAB_SIZE> weights{};
-            for (uint_t i = 0; i < vocab_size; ++i) weights[i] = arena[probs[i]].data;
+            for (uint_t i = 0; i < vocab_size; ++i) weights[i] = c_arena[probs[i]].data;
             token_id = rng.choices(weights)[0];
             if (token_id == BOS) [[unlikely]] break;
             samples.push_back(idx_to_char[token_id]);
