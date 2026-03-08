@@ -173,8 +173,6 @@ private:
     uint_t weights_end{0};
 
 public:
-    std::vector<flt_t> grad{};
-
     void weights_size_cutoff() { weights_end = size(); }
     void truncate() { resize(weights_end); }
     inline uint_t push_op(flt_t _data,
@@ -190,7 +188,7 @@ public:
 Arena arena{}; // memory management for all of our values
 const auto &c_arena{arena}; // const view (sort of)
 
-void backward() {
+std::vector<flt_t> backward() {
     std::vector<flt_t> grad(c_arena.size(), flt_t{0});
     grad.back() = flt_t{1};
 
@@ -207,7 +205,8 @@ void backward() {
             }
         }
     }
-    arena.grad.swap(grad);
+
+    return grad;
 }
 
 
@@ -485,14 +484,14 @@ int main() {
         const auto loss = div_const(total_losses, n);
 
         // backward pass
-        backward();
+        const auto grad = backward();
 
         // adam optimizer
         const flt_t lr_t = learning_rate * (flt_t{1} - flt_t(step) / NUM_STEPS);
         const flt_t beta1_pow = flt_t{1} - std::pow(beta1,(step + 1));
         const flt_t beta2_pow = flt_t{1} - std::pow(beta2,(step + 1));
         for (uint_t i = 0; i < params_size; ++i) {
-            const auto p_grad = c_arena.grad[i]; // parameter gradient
+            const auto p_grad = grad[i]; // parameter gradient
             m[i] = beta1 * m[i] + (1 - beta1) * p_grad;
             v[i] = beta2 * v[i] + (1 - beta2) * p_grad * p_grad;
             arena[i].data -= lr_t * m[i] / ((std::sqrt(v[i] / beta2_pow) + eps_adam) * beta1_pow);
