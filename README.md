@@ -26,7 +26,7 @@ All tests run on `Intel Core i9-12900K`
 |PyPy3|2m24,174s (144.174s)|1x||
 |[mplekh/rust-microgpt](https://github.com/mplekh/rust-microgpt/tree/94005e239d99382046190dd01d60a85e7b17c13b)|0m1,070s (1.07s)|134x|`RUSTFLAGS="-C target-cpu=native" cargo run --release`|
 |[Charbel199/microgpt.cpp](https://github.com/Charbel199/microgpt.cpp/tree/fc455d04fd89f49d22e183b86a51d0be3ba0e501)|0m0,893s (0.893s)|161x|`g++ -std=c++17 -Ofast -march=native -mtune=native microgpt.cpp -o microgpt`|
-|[AntonTimofeev/microgpt.cpp](https://github.com/AntonTimofeev/microgpt.cpp/tree/e592f1d5f674f3da20c95e3bd99065bd46be74f6)|0m0,832s (0.832s)|173x|`g++ -std=c++20 -O3 -ffast-math -march=native -mtune=native microgpt.cpp -o microgpt`|
+|[AntonTimofeev/microgpt.cpp](https://github.com/AntonTimofeev/microgpt.cpp/tree/e592f1d5f674f3da20c95e3bd99065bd46be74f6)|0m0,813s (0.813s)|177x|`g++ -std=c++20 -O3 -ffast-math -march=native -mtune=native microgpt.cpp -o microgpt`|
 |[mplekh/rust-matrixmicrogpt](https://github.com/mplekh/rust-matrixmicrogpt/tree/dab1fef8908235a8a4d5b73e962b2fe61e89af25)|0m0,707s (0.707s)|204x|`RUSTFLAGS="-C target-cpu=native" cargo run --release`|
 |[vixhal-baraiya/microgpt-c](https://github.com/vixhal-baraiya/microgpt-c/tree/43b3b24c781d65057f7b0e1296affd3a68a41b15)|0m0,027s (0.027s)|5339x|`gcc -O3 -ffast-math -march=native -mtune=native -o microgpt microgpt.c -lm`|
 

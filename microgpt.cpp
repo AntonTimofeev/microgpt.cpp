@@ -229,9 +229,9 @@ inline uint_t vdiv(const uint_t a, const uint_t b) { return arena.push_op(c_aren
 inline uint_t vneg(const uint_t a) { return arena.push_op(-c_arena[a].data, a, flt_t{-1.0}); }
 inline uint_t vlog(const uint_t a) { return arena.push_op(std::log(c_arena[a].data), a, flt_t{1.0}/c_arena[a].data); }
 inline uint_t vexp(const uint_t a) { const auto val = std::exp(c_arena[a].data); return arena.push_op(val, a, val); }
-inline uint_t vrelu(const uint_t a) { return arena.push_op(std::max(flt_t{0.0}, c_arena[a].data), a, c_arena[a].data > flt_t{0}); }
+inline uint_t vrelu(const uint_t a) { return c_arena[a].data > flt_t{0} ? a : arena.push_op(flt_t{0}); }
 inline uint_t vpow(const uint_t a, const flt_t n) { return arena.push_op(std::pow(c_arena[a].data, n), a, n * std::pow(c_arena[a].data, n - 1)); }
-inline uint_t vinv_sqrt(const uint_t a) { const auto val = std::pow(c_arena[a].data + flt_t{1e-5}, flt_t{-0.5}); return arena.push_op(val, a, val / (flt_t{-2} * (c_arena[a].data + flt_t{1e-5}))); }
+inline uint_t vinv_sqrt(const uint_t a) { const auto val = std::pow(c_arena[a].data + flt_t{1e-5}, flt_t{-0.5}); return arena.push_op(val, a, flt_t{-0.5} * val / (c_arena[a].data + flt_t{1e-5})); }
 
 // operations with consts (1 node instead of 2)
 inline uint_t add_const(const uint_t a, const flt_t c) { return arena.push_op(c_arena[a].data + c, a, flt_t{1.0}); }
@@ -308,9 +308,10 @@ void softmax(std::array<T, N> &out, const std::array<T, N> &logits, const uint_t
     for (uint_t i = 0; i < logits_len; ++i) max_val = std::max(max_val, c_arena[logits[i]].data);
 
     std::array<uint_t, MAX_VOCAB_SIZE> exps{}; // indices of exps
-    for (uint_t i = 0; i < logits_len; ++i) exps[i] = vexp_sub_const(logits[i], max_val);
-    auto total = exps[0];
-    for (uint_t i = 1; i < logits_len; ++i) total = vadd(total, exps[i]);
+    auto total = exps[0] = vexp_sub_const(logits[0], max_val);
+    for (uint_t i = 1; i < logits_len; ++i) {
+        total = vadd(total, exps[i] = vexp_sub_const(logits[i], max_val));
+    }
     for (uint_t i = 0; i < logits_len; ++i) out[i] = vdiv(exps[i], total);
 }
 
